@@ -1,5 +1,6 @@
 import re
 from datetime import date
+from .invoiceExtractionService import extractInvoiceData, invoicePersistenceErrors
 
 from .tools import (
     list_invoices,
@@ -22,101 +23,139 @@ class TaskAgent:
             "result": result
         })
 
-    def extract_invoice_data(self, content: str):
-        invoice_number = re.search(
-            r"Invoice Number:\s*(\S+)", content
-        )
-        invoice_date = re.search(
-            r"Invoice Date:\s*(\d{4}-\d{2}-\d{2})", content
-        )
-        due_date = re.search(
-            r"Due Date:\s*(\d{4}-\d{2}-\d{2})", content
-        )
-        amount = re.search(
-            r"Total Amount:\s*[^\d]*([\d,]+(?:\.\d+)?)",
-            content
-        )
 
-        return {
-            "invoice_number": (
-                invoice_number.group(1) if invoice_number else None
-            ),
-            "invoice_date": (
-                invoice_date.group(1) if invoice_date else None
-            ),
-            "due_date": due_date.group(1) if due_date else None,
-            "amount": (
-                float(amount.group(1).replace(",", ""))
-                if amount else None
-            ),
-        }
+    def extract_invoice_data(self, content: str):
+        """Use the same deterministic extraction supplied to Gemini tools."""
+        return extractInvoiceData(content)
+
+
 
     def find_latest_vendor_invoice(self, invoices, vendor):
-        """Select the vendor invoice with the latest invoice date."""
+        """Find the latest invoice using vendor information inside PDFs."""
 
-        vendor_key = vendor.lower()
-        matching = []
+        requestedVendor = " ".join(vendor.casefold().split())
+        matchingInvoices = []
 
         for invoice in invoices:
-            if vendor_key not in invoice["filename"].lower():
+            invoiceResult = read_invoice(invoice["filename"])
+
+            if not invoiceResult.get("success"):
                 continue
 
-            result = read_invoice(invoice["filename"])
-
-            if not result.get("success"):
-                continue
-
-            invoice_data = self.extract_invoice_data(
-                result.get("content", "")
+            invoiceData = self.extract_invoice_data(
+                invoiceResult.get("content", "")
             )
 
-            invoice_date = invoice_data.get("invoice_date")
-            if not invoice_date:
+            extractedVendor = invoiceData.get("vendor")
+            invoiceDate = invoiceData.get("invoice_date")
+
+            if not extractedVendor:
+                candidateVendors = [" ".join(value.casefold().split()) for value in invoiceData.get("vendor_candidates", [])]
+                if any(requestedVendor == value or requestedVendor in value.split() for value in candidateVendors):
+                    return None
                 continue
+
+            normalizedVendor = " ".join(
+                extractedVendor.casefold().split()
+            )
+
+            # Match the complete vendor name or a distinct word.
+            if (
+                requestedVendor != normalizedVendor
+                and requestedVendor not in normalizedVendor.split()
+            ):
+                continue
+
+            # A matching invoice with an unknown/conflicting date prevents a
+            # reliable latest-invoice decision; never silently pick an older one.
+            if not invoiceDate:
+                return None
 
             try:
-                parsed_date = date.fromisoformat(invoice_date)
-            except ValueError:
+                parsedDate = date.fromisoformat(invoiceDate)
+            except (ValueError, TypeError):
                 continue
 
-            matching.append((parsed_date, invoice))
+            matchingInvoices.append(
+                (parsedDate, invoiceData, invoice)
+            )
 
-        if not matching:
+        if not matchingInvoices:
             return None
 
-        return max(matching, key=lambda item: item[0])[1]
+        latestDate = max(item[0] for item in matchingInvoices)
+        latestMatches = [item for item in matchingInvoices if item[0] == latestDate]
+        invoiceSignatures = {
+            tuple(item[1].get(fieldName) for fieldName in (
+                "invoice_number", "invoice_date", "due_date", "amount_decimal", "currency"
+            ))
+            for item in latestMatches
+        }
+        if len(invoiceSignatures) > 1:
+            return None
+        # Identical repeated uploads are equivalent; filenames never rank dates.
+        return latestMatches[0][2]
+
+
+    def identify_requested_vendor(self, task: str, invoices):
+        """Identify the requested vendor from available PDF contents."""
+
+        normalizedTask = " ".join(task.casefold().split())
+        availableVendors = {}
+
+        for invoice in invoices:
+            invoiceResult = read_invoice(invoice["filename"])
+
+            if not invoiceResult.get("success"):
+                continue
+
+            invoiceData = self.extract_invoice_data(
+                invoiceResult.get("content", "")
+            )
+
+            vendorName = invoiceData.get("vendor")
+
+            if not vendorName:
+                continue
+
+            normalizedVendor = " ".join(
+                vendorName.casefold().split()
+            )
+
+            availableVendors[normalizedVendor] = vendorName
+
+        matchingVendors = []
+
+        for normalizedVendor, vendorName in availableVendors.items():
+            vendorWords = normalizedVendor.split()
+
+            candidates = [normalizedVendor]
+
+            if vendorWords:
+                candidates.append(vendorWords[0])
+
+            for candidate in candidates:
+                pattern = (
+                    r"(?<!\w)"
+                    + re.escape(candidate)
+                    + r"(?!\w)"
+                )
+
+                if re.search(pattern, normalizedTask):
+                    matchingVendors.append(vendorName)
+                    break
+
+        if len(matchingVendors) == 1:
+            return matchingVendors[0]
+
+        return None
+
 
     def run(self, task: str):
         self.steps = []
 
-        # Identify the requested vendor from the task.
-        vendor_patterns = {
-            "acme": "Acme Corporation",
-            "globex": "Globex Corporation",
-        }
 
-        task_lower = task.lower()
-
-        requested_vendor = next(
-            (
-                canonical_name
-                for keyword, canonical_name in vendor_patterns.items()
-                if keyword in task_lower
-            ),
-            None
-        )
-
-        if requested_vendor is None:
-            return {
-                "task": task,
-                "status": "needs_clarification",
-                "message": (
-                    "Please specify a supported vendor: Acme or Globex."
-                ),
-                "steps": self.steps
-            }
-
-        # STEP 1 — Discover invoice files.
+        # STEP 1 - Discover available invoices.
         invoices = list_invoices()
         self.record_step("list_invoices", invoices)
 
@@ -128,17 +167,37 @@ class TaskAgent:
                 "steps": self.steps
             }
 
-        # STEP 2 — Select the latest invoice for the requested vendor.
-        vendor_key = requested_vendor.split()[0].lower()
+        # STEP 2 - Identify the vendor dynamically.
+        requested_vendor = self.identify_requested_vendor(
+            task, invoices
+        )
+
+        if requested_vendor is None:
+            return {
+                "task": task,
+                "status": "needs_clarification",
+                "message": (
+                    "Could not uniquely identify a vendor "
+                    "from the available invoices. "
+                    "Please specify the company name."
+                ),
+                "steps": self.steps
+            }
+
+        self.record_step("identify_requested_vendor", {
+            "vendor": requested_vendor
+        })
+
+        # STEP 3 - Select the latest vendor invoice.
         latest_invoice = self.find_latest_vendor_invoice(
-            invoices, vendor_key
+            invoices, requested_vendor
         )
 
         if not latest_invoice:
             return {
                 "task": task,
                 "status": "failed",
-                "reason": f"No invoice was found for {requested_vendor}.",
+                "reason": f"No invoice with a reliable, unambiguous latest date was found for {requested_vendor}.",
                 "steps": self.steps
             }
 
@@ -147,7 +206,7 @@ class TaskAgent:
             **latest_invoice
         })
 
-        # STEP 3 — Read the PDF.
+        # STEP 4 — Read the PDF.
         invoice_result = read_invoice(latest_invoice["filename"])
         self.record_step("read_invoice", invoice_result)
 
@@ -159,11 +218,21 @@ class TaskAgent:
                 "steps": self.steps
             }
 
-        # STEP 4 — Extract the invoice fields.
+        # STEP 5 — Extract the invoice fields.
         invoice_data = self.extract_invoice_data(
             invoice_result["content"]
         )
         self.record_step("extract_invoice_data", invoice_data)
+
+        validationErrors = invoicePersistenceErrors(invoice_data)
+        if validationErrors:
+            return {
+                "task": task,
+                "status": "needs_clarification",
+                "reason": "Invoice extraction or validation failed.",
+                "errors": validationErrors,
+                "steps": self.steps
+            }
 
         required_fields = [
             "invoice_number", "invoice_date", "due_date", "amount"
@@ -226,11 +295,14 @@ class TaskAgent:
         })
 
 
-        # STEP 5 — Check whether the invoice already exists.
-        search_result = search_invoice(invoice_data["invoice_number"])
+        # STEP 6 — Check whether the invoice already exists.
+        search_result = search_invoice(
+            invoice_number=invoice_data["invoice_number"],
+            vendor=requested_vendor
+        )
         self.record_step("search_invoice", search_result)
 
-        # STEP 6 — Create the invoice if it is missing.
+        # STEP 7 — Create the invoice if it is missing.
         if not search_result["found"]:
             create_result = create_invoice(
                 vendor=requested_vendor,
@@ -267,7 +339,7 @@ class TaskAgent:
                 "reason": "Invoice already exists."
             })
 
-        # STEP 7 — Verify the final state against the requested vendor.
+        # STEP 8 — Verify the final state against the requested vendor.
         verification = verify_invoice(
             invoice_number=invoice_data["invoice_number"],
             expected_vendor=requested_vendor,

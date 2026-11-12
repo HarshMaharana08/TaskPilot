@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import "./App.css";
+import InvoiceUploadPanel from "./invoiceUploadPanel.jsx";
+import { apiBaseUrl, isHistoryList, isTaskResult, requestApiJson } from "./invoiceApi.js";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = apiBaseUrl;
 
 function formatAction(action) {
   const labels = {
@@ -52,7 +54,7 @@ function getStepSummary(step) {
   switch (step.action) {
     case "list_invoices": {
       const count =
-        result.count ??
+        (Array.isArray(result) ? result.length : result.count) ??
         result.invoices?.length ??
         result.files?.length;
 
@@ -128,6 +130,7 @@ function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const taskLockRef = useRef(false);
 
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -139,14 +142,12 @@ function App() {
     setHistoryError("");
 
     try {
-      const response = await fetch(`${API_BASE_URL}/tasks/history`);
-
-      if (!response.ok) {
-        throw new Error("Could not load task history.");
-      }
-
-      const data = await response.json();
-      setHistory(Array.isArray(data) ? data : []);
+      const data = await requestApiJson(`${API_BASE_URL}/tasks/history`, {}, {
+        fallback: "Could not load task history.",
+        timeoutMessage: "Loading task history timed out. Please retry.",
+      });
+      if (!isHistoryList(data)) throw new Error("TaskPilot returned unexpected task history. Please retry.");
+      setHistory(data);
     } catch (err) {
       setHistoryError(
         err.message || "An error occurred while loading task history."
@@ -159,15 +160,16 @@ function App() {
   async function runTask(event) {
     event.preventDefault();
 
-    if (!task.trim() || loading) return;
+    if (!task.trim() || taskLockRef.current) return;
 
+    taskLockRef.current = true;
     setLoading(true);
     setResult(null);
     setError("");
     setActiveView("runner");
 
     try {
-      const response = await fetch(`${API_BASE_URL}/tasks`, {
+      const data = await requestApiJson(`${API_BASE_URL}/tasks`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -176,15 +178,12 @@ function App() {
           task: task.trim(),
           mode,
         }),
+      }, {
+        timeoutMs: 180000,
+        fallback: "Unable to execute the task.",
+        timeoutMessage: "Task request timed out. Check execution history before retrying; the task may still be running.",
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.detail || "Unable to execute the task."
-        );
-      }
+      if (!isTaskResult(data)) throw new Error("TaskPilot returned an unexpected task result. Please retry.");
 
       setResult(data);
 
@@ -192,9 +191,10 @@ function App() {
       await loadHistory();
     } catch (err) {
       setError(
-        `${err.message || "Failed to fetch"}. Make sure the FastAPI backend is running.`
+        err.message || "Cannot reach TaskPilot. Make sure the FastAPI backend is running."
       );
     } finally {
+      taskLockRef.current = false;
       setLoading(false);
     }
   }
@@ -221,7 +221,7 @@ function App() {
     setActiveView("runner");
   }
 
-  function useSuggestedTask(vendor) {
+  function applySuggestedTask(vendor) {
     setTask(
       `Find the latest invoice from ${vendor} and enter it into the company system`
     );
@@ -300,7 +300,13 @@ function App() {
                 the workflow, record its actions, and verify the result.
               </p>
             </section>
-
+          </>
+        )}
+        <div hidden={activeView !== "runner"}>
+          <InvoiceUploadPanel apiBaseUrl={API_BASE_URL} />
+        </div>
+        {activeView === "runner" && (
+          <>
             <section className="task-card">
               <div className="card-heading">
                 <div>
@@ -361,7 +367,7 @@ function App() {
                 <button
                   type="button"
                   className="suggestion"
-                  onClick={() => useSuggestedTask("Acme")}
+                  onClick={() => applySuggestedTask("Acme")}
                 >
                   Process latest Acme invoice ↗
                 </button>
@@ -369,7 +375,7 @@ function App() {
                 <button
                   type="button"
                   className="suggestion"
-                  onClick={() => useSuggestedTask("Globex")}
+                  onClick={() => applySuggestedTask("Globex")}
                 >
                   Process latest Globex invoice ↗
                 </button>
@@ -428,6 +434,8 @@ function App() {
 
                   <p className="result-message">
                     {result.message ||
+                      result.summary ||
+                      result.reason ||
                       result.error ||
                       "No result message was provided."}
                   </p>

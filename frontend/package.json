@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/invoiceApi.test.mjs tests/step6ApiReliability.test.mjs",
+    "test:browser": "node --test tests/uploadBrowser.test.mjs"
   },
   "dependencies": {
     "react": "^19.2.8",

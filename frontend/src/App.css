@@ -738,3 +738,99 @@ footer {
 .history-error {
   color: #ff929e;
 }
+
+.invoice-upload-panel input[type="file"] {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  color: #d8d9e5;
+  background: #0c0f16;
+  border: 1px solid #343847;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.app-shell h1,
+.app-shell h2 { color: #e8eaf2; }
+
+.invoice-upload-panel input::file-selector-button {
+  margin-right: 12px;
+  padding: 8px 12px;
+  color: #d9ceff;
+  background: #211d34;
+  border: 1px solid #49405f;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.invoice-upload-panel input:focus-visible,
+.invoice-upload-panel button:focus-visible {
+  outline: 2px solid #b7a0ff;
+  outline-offset: 3px;
+}
+
+.upload-help {
+  margin: 10px 0 0;
+  color: #9297a9;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.selected-file {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 16px 0 0;
+  font-size: 12px;
+}
+
+.selected-file strong,
+.invoice-file-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.selected-file span { color: #a4a9ba; }
+
+.upload-error,
+.upload-success {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.upload-error { color: #ff929e; }
+.upload-success { color: #6fe3b2; }
+.upload-footer { align-items: center; }
+.upload-footer button { flex-shrink: 0; }
+
+.available-invoices {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #292d3a;
+}
+
+.invoice-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.invoice-list-heading h4 { margin: 0; font-size: 13px; }
+.invoice-list-heading h4 span { color: #9297a9; }
+.invoice-file-list { margin: 14px 0 0; padding: 0; list-style: none; max-height: 240px; overflow-y: auto; }
+.invoice-file-list li { display: flex; align-items: center; gap: 10px; padding: 10px 0; font-size: 12px; }
+.pdf-label { flex-shrink: 0; border: 1px solid #363047; border-radius: 5px; padding: 4px 6px; color: #c4b4ff; font-size: 9px; }
+.refresh-button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (max-width: 650px) {
+  .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .brand { grid-column: 1 / -1; }
+  .nav-item { display: block; margin-bottom: 0; }
+  .upload-footer { align-items: stretch; }
+}
