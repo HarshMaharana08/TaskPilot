@@ -1,4 +1,3 @@
-```gitignore
 # Python virtual environments
 .venv/
 venv/
@@ -17,14 +16,32 @@ __pycache__/
 node_modules/
 dist/
 
-# Local databases
-data/taskpilot.db
+# Local databases, backups, and transient journals
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
 *.db-shm
 *.db-wal
+data/backups/
+
+# Local uploads; retain the five existing synthetic demo fixtures
+data/invoices/*
+!data/invoices/acme_invoice_103.pdf
+!data/invoices/acme_invoice_104.pdf
+!data/invoices/acme_invoice_105.pdf
+!data/invoices/globex_invoice_201.pdf
+!data/invoices/globex_invoice_202.pdf
+/oracle_invoice_test.pdf
+
+# Generated test output, not test source or reports
+frontend/test-results/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Editor and operating system files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-```

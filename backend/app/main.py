@@ -1,8 +1,12 @@
 import json
+from datetime import date
+import math
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import OperationalError
 
 from .database import Base, engine, SessionLocal
 from .models import Invoice, TaskRun
@@ -15,6 +19,7 @@ from .tools import (
 )
 from .gemini_agent import GeminiTaskAgent
 from .agent import TaskAgent
+from .invoiceUploadService import saveInvoicePdf
 
 
 # Create database tables
@@ -25,6 +30,16 @@ app = FastAPI(
     description="Autonomous AI Task Worker",
     version="1.0.0"
 )
+
+
+@app.exception_handler(OperationalError)
+async def handleDatabaseUnavailable(request, error):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The company database is unavailable or busy. Please retry shortly."},
+        headers={"Retry-After": "1"},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,18 +77,46 @@ def get_invoices():
     return list_invoices()
 
 
+@app.post("/invoices/upload", status_code=201)
+async def uploadInvoice(
+    uploadedFile: UploadFile = File(...)
+):
+    return await saveInvoicePdf(uploadedFile)
+
+
 @app.get("/tools/invoices/{filename}")
 def get_invoice(filename: str):
     return read_invoice(filename)
 
 
 @app.get("/tools/search/{invoice_number}")
-def search_invoice_endpoint(invoice_number: str):
-    return search_invoice(invoice_number)
+def search_invoice_endpoint(
+    invoice_number: str,
+    vendor: str | None = None
+):
+    return search_invoice(
+        invoice_number=invoice_number,
+        vendor=vendor
+    )
 
 
 @app.post("/tools/invoices")
 def create_invoice_endpoint(invoice: dict):
+    # Validate before duplicate lookup or any possible write. The PDF workflow
+    # already validates extraction; direct API callers need the same safeguards.
+    for fieldName in ("vendor", "invoice_number", "invoice_date", "due_date"):
+        if not isinstance(invoice.get(fieldName), str) or not invoice[fieldName].strip():
+            raise HTTPException(status_code=422, detail=f"{fieldName} must be a nonempty string.")
+    try:
+        invoiceDate = date.fromisoformat(invoice["invoice_date"])
+        dueDate = date.fromisoformat(invoice["due_date"])
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invoice and due dates must be valid ISO dates.") from None
+    if dueDate < invoiceDate:
+        raise HTTPException(status_code=422, detail="Due date cannot precede invoice date.")
+    amount = invoice.get("amount")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0 or amount > 999999999999.99 or not math.isfinite(amount):
+        raise HTTPException(status_code=422, detail="amount must be a finite, positive number within the supported range.")
     return create_invoice(
         vendor=invoice["vendor"],
         invoice_number=invoice["invoice_number"],
@@ -84,19 +127,26 @@ def create_invoice_endpoint(invoice: dict):
 
 
 @app.get("/tools/verify/{invoice_number}")
-def verify_invoice_endpoint(invoice_number: str):
+def verify_invoice_endpoint(
+    invoice_number: str,
+    vendor: str,
+    invoice_date: str,
+    due_date: str,
+    amount: float
+):
     return verify_invoice(
         invoice_number=invoice_number,
-        expected_vendor="Acme Corporation",
-        expected_invoice_date="2026-10-01",
-        expected_due_date="2026-11-01",
-        expected_amount=84500
+        expected_vendor=vendor,
+        expected_invoice_date=invoice_date,
+        expected_due_date=due_date,
+        expected_amount=amount
     )
 
 
 @app.post("/tasks")
 def run_task(request: TaskRequest):
-    from fastapi import HTTPException
+    if not request.task.strip():
+        raise HTTPException(status_code=422, detail="Task instructions cannot be empty.")
 
     if request.mode not in {"auto", "gemini", "local"}:
         raise HTTPException(

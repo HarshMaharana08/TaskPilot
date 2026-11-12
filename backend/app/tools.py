@@ -1,10 +1,14 @@
 from datetime import date
 from pathlib import Path
-
-import pymupdf
+import sqlite3
 
 from .database import SessionLocal
 from .models import Invoice
+from .invoiceExtractionService import (
+    InvoiceDocumentError, extractInvoiceData, extractPdfText, maxPdfBytes,
+)
+from sqlalchemy import func
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 CREATE_FAILURE_SIMULATION = True
 
@@ -26,13 +30,44 @@ def list_invoices():
     invoices = []
 
     for file in INVOICE_DIR.iterdir():
-        if file.is_file() and file.suffix.lower() == ".pdf":
+        try:
+            safePath = resolveInvoicePath(file.name)
+        except (ValueError, OSError):
+            continue
+        if safePath.is_file():
             invoices.append({
                 "filename": file.name,
-                "path": str(file)
+                "path": str(safePath)
             })
 
     return invoices
+
+
+def resolveInvoicePath(filename: str) -> Path:
+    """Allow a single PDF basename, contained in the configured directory."""
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename != filename.strip()
+        or filename.endswith((".", " "))
+        or any(character in filename for character in '/\\:<>"|?*')
+        or any(ord(character) < 32 for character in filename)
+        or Path(filename).is_absolute()
+        or Path(filename).suffix.lower() != ".pdf"
+        or filename.split(".")[0].upper() in {
+            "CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)),
+            *(f"LPT{number}" for number in range(1, 10)),
+        }
+    ):
+        raise ValueError("A safe PDF filename without path components is required.")
+    invoiceRoot = INVOICE_DIR.resolve()
+    candidatePath = invoiceRoot / filename
+    if candidatePath.is_symlink():
+        raise ValueError("Linked invoice files are not supported.")
+    resolvedPath = candidatePath.resolve()
+    if resolvedPath.parent != invoiceRoot:
+        raise ValueError("Invoice path is outside the invoice directory.")
+    return resolvedPath
 
 
 def read_invoice(filename: str):
@@ -40,55 +75,67 @@ def read_invoice(filename: str):
     Read the text content of an invoice PDF.
     """
 
-    file_path = INVOICE_DIR / filename
-
-    if not file_path.exists():
-        return {
-            "success": False,
-            "error": f"Invoice file not found: {filename}"
-        }
-
-    if file_path.suffix.lower() != ".pdf":
-        return {
-            "success": False,
-            "error": "Only PDF files are supported."
-        }
-
     try:
-        document = pymupdf.open(file_path)
-
-        text = ""
-
-        for page in document:
-            text += page.get_text()
-
-        document.close()
-
+        filePath = resolveInvoicePath(filename)
+        if not filePath.is_file():
+            return {"success": False, "error": "Invoice PDF was not found."}
+        with filePath.open("rb") as invoiceFile:
+            fileContent = invoiceFile.read(maxPdfBytes + 1)
+        text, pageCount = extractPdfText(fileContent)
         return {
             "success": True,
             "filename": filename,
-            "content": text.strip()
+            "content": text,
+            "extraction": extractInvoiceData(text),
+            "page_count": pageCount,
+            "content_is_untrusted": True,
         }
+    except (ValueError, InvoiceDocumentError) as error:
+        return {"success": False, "error": str(error)}
+    except OSError:
+        return {"success": False, "error": "Invoice PDF could not be accessed."}
 
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
 
-def search_invoice(invoice_number: str):
+def search_invoice(invoice_number: str, vendor: str | None = None):
     """
-    Search for an invoice in the internal company database.
+    Search for an invoice using its number and, when provided,
+    its vendor.
+
+    Vendor matching is case-insensitive and ignores leading
+    and trailing whitespace.
     """
 
     db = SessionLocal()
 
     try:
-        invoice = (
-            db.query(Invoice)
-            .filter(Invoice.invoice_number == invoice_number)
-            .first()
+        query = db.query(Invoice).filter(
+            Invoice.invoice_number == invoice_number
         )
+
+        if vendor is not None:
+            normalizedVendor = vendor.strip().casefold()
+
+            query = query.filter(
+                func.lower(func.trim(Invoice.vendor)) == normalizedVendor
+            )
+        else:
+            # Legacy callers may omit the vendor.
+            # Never arbitrarily select a record when multiple vendors
+            # share the same invoice number.
+            matches = query.limit(2).all()
+
+            if len(matches) > 1:
+                return {
+                    "found": False,
+                    "invoice_number": invoice_number,
+                    "ambiguous": True,
+                    "reason": (
+                        "Multiple vendors have this invoice number. "
+                        "Specify the vendor."
+                    )
+                }
+
+        invoice = query.first()
 
         if invoice is None:
             return {
@@ -113,6 +160,7 @@ def search_invoice(invoice_number: str):
         db.close()
 
 
+
 def create_invoice(
     vendor: str,
     invoice_number: str,
@@ -135,12 +183,17 @@ def create_invoice(
         }
 
     db = SessionLocal()
+    commitAttempted = False
+    commitSucceeded = False
 
     try:
         # Prevent creating the same invoice twice.
         existing_invoice = (
             db.query(Invoice)
-            .filter(Invoice.invoice_number == invoice_number)
+            .filter(
+                Invoice.invoice_number == invoice_number,
+                func.lower(func.trim(Invoice.vendor)) == vendor.strip().casefold()
+            )
             .first()
         )
 
@@ -173,7 +226,9 @@ def create_invoice(
         )
 
         db.add(new_invoice)
+        commitAttempted = True
         db.commit()
+        commitSucceeded = True
         db.refresh(new_invoice)
 
         return {
@@ -193,15 +248,39 @@ def create_invoice(
     except Exception as e:
         db.rollback()
 
-        # A commit may have succeeded even if a later operation failed.
-        # Check using a fresh session before reporting failure.
+        # Recover only a conflict on this invoice key or an uncertain/successful
+        # commit. A matching row must not conceal unrelated database failures.
+        invoiceUniqueConflict = (
+            isinstance(e, IntegrityError)
+            and isinstance(e.orig, sqlite3.IntegrityError)
+            and getattr(e.orig, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+            and str(e.orig) == (
+                "UNIQUE constraint failed: index "
+                "'ux_invoices_vendor_invoice_number_normalized'"
+            )
+        )
+        uncertainCommit = (
+            commitAttempted
+            and isinstance(e, DBAPIError)
+            and e.connection_invalidated
+        )
+        if not (invoiceUniqueConflict or commitSucceeded or uncertainCommit):
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+        # Rollback above clears the failed transaction before this fresh lookup.
         db.close()
         db = SessionLocal()
 
         try:
             existing_invoice = (
                 db.query(Invoice)
-                .filter(Invoice.invoice_number == invoice_number)
+                .filter(
+                    Invoice.invoice_number == invoice_number,
+                    func.lower(func.trim(Invoice.vendor)) == vendor.strip().casefold()
+                )
                 .first()
             )
 
@@ -249,7 +328,10 @@ def verify_invoice(
     matches the expected values.
     """
 
-    result = search_invoice(invoice_number)
+    result = search_invoice(
+        invoice_number=invoice_number,
+        vendor=expected_vendor
+    )
 
     if not result["found"]:
         return {
@@ -262,12 +344,22 @@ def verify_invoice(
 
     mismatches = []
 
-    if invoice["vendor"] != expected_vendor:
+
+    normalizedExpectedVendor = " ".join(
+        expected_vendor.casefold().split()
+    )
+
+    normalizedStoredVendor = " ".join(
+        invoice["vendor"].casefold().split()
+    )
+
+    if normalizedStoredVendor != normalizedExpectedVendor:
         mismatches.append({
             "field": "vendor",
             "expected": expected_vendor,
             "actual": invoice["vendor"]
         })
+
 
     if invoice["invoice_date"] != expected_invoice_date:
         mismatches.append({
@@ -305,53 +397,33 @@ def verify_invoice(
         "invoice": invoice
     }
 
+
 def find_latest_invoice(vendor: str):
     """
-    Find the latest invoice PDF for a given vendor.
-    The latest invoice is determined by the highest invoice number.
+    Find the latest invoice for a vendor using PDF contents
+    rather than filenames.
     """
 
-    invoice_dir = Path(__file__).resolve().parents[2] / "data" / "invoices"
+    from .agent import TaskAgent
 
-    # Match the first meaningful word of the vendor name.
-    # Example:
-    # "Acme Corporation" -> "acme"
-    # "Globex Corporation" -> "globex"
-    vendor_key = vendor.lower().split()[0]
+    agent = TaskAgent()
+    invoices = list_invoices()
 
-    matching_files = []
+    latestInvoice = agent.find_latest_vendor_invoice(
+        invoices,
+        vendor
+    )
 
-    for file in invoice_dir.glob("*.pdf"):
-        filename_normalized = file.stem.lower()
-
-        if vendor_key in filename_normalized:
-            matching_files.append(file)
-
-    if not matching_files:
+    if latestInvoice is None:
         return {
             "found": False,
             "vendor": vendor,
             "reason": "No matching invoice files found."
         }
 
-    def invoice_number(file):
-        import re
-
-        numbers = re.findall(r"\d+", file.stem)
-
-        if not numbers:
-            return 0
-
-        return int(numbers[-1])
-
-    latest_file = max(
-        matching_files,
-        key=invoice_number
-    )
-
     return {
         "found": True,
         "vendor": vendor,
-        "filename": latest_file.name,
-        "invoice_number": invoice_number(latest_file)
+        "filename": latestInvoice["filename"],
+        "path": latestInvoice["path"]
     }
