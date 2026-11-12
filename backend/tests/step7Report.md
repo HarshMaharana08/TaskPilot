@@ -1,6 +1,7 @@
-# Step 7 — documentation, cleanup, reproducibility, and local Git commit
+# STEP 7: COMPLETE — documentation, cleanup, reproducibility, and local Git commit
 
-Validation status: PASS. Git finalization: pending the authorized local commits.
+Validation status: PASS. The reviewed implementation was committed locally;
+the implementation hash and final audit are recorded in this documentation update.
 
 ## Repository audit
 
@@ -163,6 +164,8 @@ installed into the original working environment.
 ## Cleanup and commit boundaries
 
 - Removed only the verified generated backend `__pycache__` directory.
+- Removed the approved disposable clean-install environment/source copy after all
+  tests completed, with its exact resolved temporary path verified before deletion.
 - Removed existing trailing whitespace in source being prepared for commit.
 - Fixed `.gitignore` fences/rules. Local `.env`, virtual environment, dependencies,
   `dist/`, screenshots, databases/journals, backups, new uploads, and the local
@@ -176,8 +179,9 @@ installed into the original working environment.
   filesystem paths in commit candidates. Synthetic password/API placeholders in
   tests are intentionally public, not real credentials.
 - Git author identity is configured and no executable custom hook was found.
-  Index/diff review, staged-content scanning, and prohibited-artifact checks are
-  required immediately before the local commit.
+  Index/diff review, staged-content scanning, and prohibited-artifact checks all
+  passed immediately before the local commit: 37 staged text files, no binaries,
+  no prohibited artifacts, and original migration bytes preserved in the index.
 
 ## Database and file safety
 
@@ -225,14 +229,22 @@ Step 1–6 services, migrations, tests, API changes, and React upload workflow.
 
 ## Git finalization
 
-Implementation commit hash: pending local commit creation.
+Implementation commit hash: `70741a1fefebb048837f61fefb180a27d36eb366`.
 
-Intended message:
+Commit message:
 `feat: complete dynamic invoice processing and frontend upload workflow`
 
-The implementation commit will include this report. A small follow-up documentation
-commit will record its actual hash and final status without amending history; a
-commit cannot embed its own final hash. No remote operation is authorized or planned.
+Branch: `feature/dynamic-invoice-upload`.
+
+After this commit, `git status --short` was empty. The implementation commit
+included this report. The follow-up commit `docs: record final validation commit`
+updates only this report with the implementation hash and completion status;
+no history is amended. Its own identifier can be read with
+`git log -1 --format="%H %s" -- backend/tests/step7Report.md`.
+
+Final status after the report-only commit: a clean tracked/untracked working
+tree (`git status --short` has no entries); ignored local data/dependencies remain available. No push or
+deployment command was executed. No unrelated changes were discarded.
 
 ## Remaining limitations
 
@@ -245,4 +257,6 @@ remain unverified. Existing Starlette/httpx deprecation and Git LF/CRLF notices
 are documented; dependencies were not upgraded to suppress warnings. No license
 was invented. No deployment or push was performed.
 
-Overall status: validation complete; local Git finalization pending.
+Overall status: **STEP 7: COMPLETE**. All validation passed, the local implementation
+commit exists, and this final report is included in the local documentation commit.
+No deployment or push was performed.
